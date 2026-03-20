@@ -1,0 +1,191 @@
+{% extends "files/base.html" %}
+
+{% block title %}Admin Dashboard - Drive Sharing{% endblock %}
+
+{% block content %}
+  <div class="row g-4">
+    <div class="col-12">
+      <div class="p-4 app-card bg-white">
+        <div class="d-flex flex-column flex-md-row align-items-start align-items-md-center justify-content-between gap-3">
+          <div>
+            <h2 class="mb-1">Admin Dashboard</h2>
+            <div class="text-muted">Create users and check app stats.</div>
+          </div>
+          <div class="text-muted small">
+            Signed in as <strong>{{ request.user.username }}</strong>
+          </div>
+        </div>
+
+        <div class="row g-3 mt-2">
+          <div class="col-12 col-md-4">
+            <div class="border rounded-3 p-3 bg-light h-100">
+              <div class="text-muted small mb-1">Total users</div>
+              <div class="fs-4 fw-bold">{{ total_users }}</div>
+            </div>
+          </div>
+          <div class="col-12 col-md-4">
+            <div class="border rounded-3 p-3 bg-light h-100">
+              <div class="text-muted small mb-1">Active users</div>
+              <div class="fs-4 fw-bold">{{ active_users }}</div>
+            </div>
+          </div>
+          <div class="col-12 col-md-4">
+            <div class="border rounded-3 p-3 bg-light h-100">
+              <div class="text-muted small mb-1">Superusers</div>
+              <div class="fs-4 fw-bold">{{ superusers }}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-4 border rounded-3 p-3 bg-light">
+          <div class="d-flex flex-column flex-md-row align-items-start align-items-md-center justify-content-between gap-2">
+            <div>
+              <div class="text-muted small mb-1">Google Drive connection</div>
+              <div class="fs-5 fw-semibold">
+                {% if drive_configured %}
+                  Connected
+                {% else %}
+                  Not connected
+                {% endif %}
+              </div>
+              <div class="text-muted small mt-1">
+                {% if drive_updated_at %}
+                  Last updated: {{ drive_updated_at }}
+                {% else %}
+                  Connect Google Drive to enable upload/search/download.
+                {% endif %}
+              </div>
+            </div>
+            <div>
+              {% if user.is_superuser %}
+                <a class="btn btn-outline-primary" href="/google/connect/">
+                  Connect Google Drive
+                </a>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+
+        <div class="row g-4 mt-4">
+          <div class="col-12 col-lg-5">
+            <h5 class="mb-3">Create User</h5>
+
+            {% if created %}
+              <div class="alert alert-success">User created successfully.</div>
+            {% endif %}
+
+            {% if error %}
+              <div class="alert alert-danger">{{ error }}</div>
+            {% endif %}
+
+            <form method="post" class="card p-3 bg-white">
+              {% csrf_token %}
+              <div class="mb-3">
+                <label class="form-label">Username</label>
+                <input
+                  type="text"
+                  class="form-control"
+                  name="username"
+                  required
+                />
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Password</label>
+                <input
+                  type="password"
+                  class="form-control"
+                  name="password"
+                  required
+                />
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Email (optional)</label>
+                <input
+                  type="email"
+                  class="form-control"
+                  name="email"
+                />
+              </div>
+
+              <div class="form-check mb-2">
+                <input
+                  class="form-check-input"
+                  type="checkbox"
+                  id="is_staff"
+                  name="is_staff"
+                />
+                <label class="form-check-label" for="is_staff">
+                  Staff
+                </label>
+              </div>
+              <div class="form-check mb-3">
+                <input
+                  class="form-check-input"
+                  type="checkbox"
+                  id="is_superuser"
+                  name="is_superuser"
+                />
+                <label class="form-check-label" for="is_superuser">
+                  Superuser
+                </label>
+              </div>
+
+              <button class="btn btn-primary w-100" type="submit">
+                Create User
+              </button>
+            </form>
+          </div>
+
+          <div class="col-12 col-lg-7">
+            <h5 class="mb-3">Recent Users</h5>
+            <div class="card p-3 bg-white">
+              <div class="table-responsive">
+                <table class="table table-sm table-striped align-middle mb-0">
+                  <thead>
+                    <tr>
+                      <th>Username</th>
+                      <th>Active</th>
+                      <th>Superuser</th>
+                      <th>Joined</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for u in recent_users %}
+                      <tr>
+                        <td>{{ u.username }}</td>
+                        <td>
+                          {% if u.is_active %}
+                            Yes
+                          {% else %}
+                            No
+                          {% endif %}
+                        </td>
+                        <td>
+                          {% if u.is_superuser %}
+                            Yes
+                          {% else %}
+                            No
+                          {% endif %}
+                        </td>
+                        <td>{{ u.date_joined }}</td>
+                      </tr>
+                    {% empty %}
+                      <tr>
+                        <td colspan="4" class="text-muted">No users found.</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="text-muted small mt-2">
+              Note: This dashboard uses Django auth. It does not store per-file upload history.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+
