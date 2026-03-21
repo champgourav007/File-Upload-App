@@ -1,1 +1,0 @@
-# .env Integration TODO&#10;&#10;✅ 1. Add python-dotenv to requirements.txt&#10;⏳ 2. pip install -r requirements.txt&#10;⏳ 3. Edit drive_app/settings.py to load .env&#10;⏳ 4. Create sample .env&#10;⏳ 5. Test with python manage.py runserver&#10;

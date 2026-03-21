@@ -2,15 +2,17 @@ import io
 import os
 import tempfile
 
+import django
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.contrib.auth.models import User
 from django.shortcuts import redirect, render
 from django.http import FileResponse, HttpResponseBadRequest
 from django.urls import reverse
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from django.utils import timezone
+from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
-from .models import DriveAppCredentials
-from .utils import get_flow, get_drive_service
+from .models import DriveAppCredentials, FileAccess, FileActivityLog
+from .utils import get_flow, get_drive_service, get_user_folder
 
 
 def home(request):
@@ -71,6 +73,7 @@ def oauth2callback(request):
     flow.fetch_token(
         authorization_response=request.build_absolute_uri(),
         code_verifier=code_verifier,
+        include_granted_scopes="true",
     )
 
     # One-time PKCE values; clear them to avoid accidental reuse.
@@ -96,45 +99,112 @@ def _google_escape_query(s: str) -> str:
 def admin_dashboard(request):
     """
     Admin dashboard:
-    - create Django users (username/password/email, staff/superuser flags)
-    - show basic stats (users + Drive connection)
+    - create Django users
+    - file management & stats
     """
     error = None
     created = False
 
     if request.method == "POST":
-        username = (request.POST.get("username") or "").strip()
-        password = request.POST.get("password") or ""
-        email = (request.POST.get("email") or "").strip()
-        is_staff = request.POST.get("is_staff") == "on"
-        make_superuser = request.POST.get("is_superuser") == "on"
+        action = request.POST.get("action")
+        
+        if action == "create_user":
+            username = (request.POST.get("username") or "").strip()
+            password = request.POST.get("password") or ""
+            email = (request.POST.get("email") or "").strip()
+            is_staff = request.POST.get("is_staff") == "on"
+            make_superuser = request.POST.get("is_superuser") == "on"
 
-        if not username or not password:
-            error = "Username and password are required."
-        elif User.objects.filter(username=username).exists():
-            error = "A user with that username already exists."
-        else:
-            user = User.objects.create_user(
-                username=username,
-                password=password,
-                email=email or "",
+            if not username or not password:
+                error = "Username and password are required."
+            elif User.objects.filter(username=username).exists():
+                error = "Username already exists."
+            else:
+                user = User.objects.create_user(
+                    username=username,
+                    password=password,
+                    email=email or "",
+                )
+                user.is_staff = is_staff
+                user.is_superuser = make_superuser
+                if make_superuser:
+                    user.is_staff = True
+                user.save(update_fields=["is_staff", "is_superuser"])
+                created = True
+                
+        elif action == "toggle_access":
+            file_id = request.POST.get("file_id")
+            user_id = request.POST.get("user_id")
+            permission = request.POST.get("permission")  # 'read' or 'write'
+            
+            access, created = FileAccess.objects.get_or_create(
+                file_id=file_id, 
+                user_id=user_id,
+                defaults={'name': request.POST.get("file_name", 'Unknown')}
             )
-            user.is_staff = is_staff
-            user.is_superuser = make_superuser
-            if make_superuser:
-                user.is_staff = True
-            user.save(update_fields=["is_staff", "is_superuser"])
-            created = True
-
+            # Fetch folder_id from Drive if not set
+            if not access.folder_id:
+                service = get_drive_service()
+                if service:
+                    try:
+                        file_metadata = service.files().get(
+                            fileId=file_id, 
+                            fields='parents'
+                        ).execute()
+                        parents = file_metadata.get('parents', [])
+                        if parents:
+                            access.folder_id = parents[0]  # Use first parent (primary folder)
+                    except Exception:
+                        pass  # Fail silently if Drive unavailable
+            if permission == 'read':
+                access.can_read = not access.can_read
+            else:
+                access.can_write = not access.can_write
+            access.save()
+    
+    # User stats
     total_users = User.objects.count()
     active_users = User.objects.filter(is_active=True).count()
     superusers = User.objects.filter(is_superuser=True).count()
+    recent_users = User.objects.order_by("-date_joined")[:8]
 
+    # Drive status
     creds_row = DriveAppCredentials.objects.order_by("-updated_at").first()
     drive_configured = bool(creds_row and creds_row.data)
     drive_updated_at = creds_row.updated_at if creds_row else None
 
-    recent_users = User.objects.order_by("-date_joined")[:8]
+    # All Drive files (admin sees everything)
+    service = get_drive_service()
+    all_files = []
+    if service:
+        try:
+            results = service.files().list(
+                pageSize=50,
+                fields="files(id, name, mimeType, parents)",
+                q="trashed=false"
+            ).execute()
+            all_files = results.get("files", [])
+        except Exception:
+            pass  # Graceful if Drive down
+
+    # File accesses - now with folder_id context
+    file_accesses = FileAccess.objects.select_related('user').order_by('-created_at')[:20]
+
+    # Activity stats
+    activity_stats = {
+        'total_uploads': FileActivityLog.objects.filter(action='upload').count(),
+        'total_downloads': FileActivityLog.objects.filter(action='download').count(),
+        'total_actions': FileActivityLog.objects.count(),
+        'recent_logs': FileActivityLog.objects.select_related('user').order_by('-timestamp')[:10],
+        'uploads_today': FileActivityLog.objects.filter(
+            action='upload',
+            timestamp__date=django.utils.timezone.now().date()
+        ).count(),
+        'downloads_today': FileActivityLog.objects.filter(
+            action='download',
+            timestamp__date=django.utils.timezone.now().date()
+        ).count(),
+    }
 
     return render(
         request,
@@ -148,6 +218,9 @@ def admin_dashboard(request):
             "drive_configured": drive_configured,
             "drive_updated_at": drive_updated_at,
             "recent_users": recent_users,
+            "all_files": all_files,
+            "file_accesses": file_accesses,
+            "activity_stats": activity_stats,
         },
     )
 
@@ -167,16 +240,45 @@ def list_files(request):
         )
 
     q = (request.GET.get("q") or "").strip()
-    drive_q = "trashed=false"
+    
+    # Build query - user's folder + shared files they can access
+    user_folder_id = get_user_folder(service, request.user)
+    base_q = f"'{user_folder_id}' in parents and trashed=false"
+    
+    # Add admin-accessible files from other folders - now using folder_id context
+    user_accesses = FileAccess.objects.filter(
+        user=request.user, 
+        can_read=True
+    ).select_related('user')
+    user_access_files = [access.file_id for access in user_accesses if access.file_id != user_folder_id]
+    user_file_access = [fid for fid in user_access_files]
+    
+    # Optionally group by folder_id for future tree views
+    folder_accesses = {}
+    for access in user_accesses:
+        if access.folder_id and access.file_id != user_folder_id:
+            if access.folder_id not in folder_accesses:
+                folder_accesses[access.folder_id] = []
+            folder_accesses[access.folder_id].append(access.file_id)
+    
+    if user_file_access:
+        # shared_q_parts = [f"id = '{fid}'" for fid in user_file_access]
+        # base_q = f"({base_q}) or ({' or '.join(shared_q_parts)})"
+        pass
+    
     if q:
-        drive_q = f"{drive_q} and name contains '{_google_escape_query(q)}'"
+        base_q += f" and name contains '{_google_escape_query(q)}'"
 
+    print(f"Drive query for {request.user.username}: {base_q}")  # Debug
+    print(f"User access files: {user_access_files}")  # Debug
+    print(f"Folder accesses: {folder_accesses}")  # Debug
+    
     results = (
         service.files()
         .list(
-            pageSize=20,
-            fields="files(id, name)",
-            q=drive_q,
+            pageSize=50,
+            fields="files(id, name, mimeType, thumbnailLink, webViewLink)",
+            q=base_q,
             orderBy="name",
         )
         .execute()
@@ -191,6 +293,7 @@ def list_files(request):
             "drive_configured": True,
             "files": files,
             "q": q,
+            "folder_accesses": folder_accesses,  # Pass for template use
         },
     )
 
@@ -208,28 +311,24 @@ def upload_file(request):
     if not uploaded:
         return HttpResponseBadRequest("No file uploaded.")
 
-    # `MediaFileUpload` requires a filesystem path.
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            tmp_path = tmp.name
-            for chunk in uploaded.chunks():
-                tmp.write(chunk)
+    # Get/create user folder
+    user_folder_id = get_user_folder(service, request.user)
 
-        media = MediaFileUpload(
-            tmp_path,
-            mimetype=getattr(uploaded, "content_type", None) or None,
-            resumable=True,
-        )
+    # Direct in-memory upload to user folder
+    media = MediaIoBaseUpload(
+        io.BytesIO(uploaded.read()),
+        mimetype=uploaded.content_type,
+        resumable=False
+    )
 
-        service.files().create(
-            body={"name": uploaded.name},
-            media_body=media,
-            fields="id",
-        ).execute()
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+    service.files().create(
+        body={
+            "name": uploaded.name,
+            "parents": [user_folder_id]
+        },
+        media_body=media,
+        fields="id",
+    ).execute()
 
     return redirect("/files/")
 
@@ -240,13 +339,22 @@ def download_file(request, file_id):
     if not service:
         return redirect("/files/")
 
+    # Get file metadata for correct name
+    file_metadata = service.files().get(fileId=file_id, fields='name').execute()
+    filename = file_metadata.get('name', 'file')
+
     request_file = service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request_file)
 
     done = False
     while not done:
-        _, done = downloader.next_chunk()
+        status, done = downloader.next_chunk()
+        if status:
+            print(f"Download progress: {int(status.progress() * 100)}%")
 
     fh.seek(0)
-    return FileResponse(fh, as_attachment=True, filename="file")
+    response = FileResponse(fh, as_attachment=True)
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    response['Content-Type'] = 'application/octet-stream'
+    return response
